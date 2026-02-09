@@ -73,13 +73,27 @@ async function disposeTelemetryServices(): Promise<void> {
 	}
 
 	telemetryDisposed = true
-	await Promise.allSettled([
-		telemetryService.dispose(),
-		PostHogClientProvider.getInstance().dispose(),
-	])
+	await Promise.allSettled([telemetryService.dispose(), PostHogClientProvider.getInstance().dispose()])
+}
+
+/**
+ * Restore yoloModeToggled to its original value from before this CLI session.
+ * This ensures the --yolo flag is session-only and doesn't leak into future runs.
+ * Must be called before flushPendingState so the restored value gets persisted.
+ */
+function restoreYoloState(): void {
+	if (didTemporarilyOverrideYolo && savedYoloModeToggled !== null) {
+		try {
+			StateManager.get().setGlobalState("yoloModeToggled", savedYoloModeToggled)
+		} catch {
+			// StateManager may not be initialized (e.g., early exit before init)
+		}
+		didTemporarilyOverrideYolo = false
+	}
 }
 
 async function disposeCliContext(ctx: CliContext): Promise<void> {
+	restoreYoloState()
 	await ctx.controller.stateManager.flushPendingState()
 	await ctx.controller.dispose()
 	await ErrorService.get().dispose()
@@ -192,9 +206,11 @@ function applyTaskOptions(options: TaskOptions): void {
 		telemetryService.captureHostEvent("max_consecutive_mistakes_flag", String(maxConsecutiveMistakes))
 	}
 
-	// Set yolo mode based on --yolo flag
+	// Override yolo mode only if --yolo flag is explicitly passed.
+	// The original value is saved in initializeCli and restored on exit.
 	if (options.yolo) {
 		StateManager.get().setGlobalState("yoloModeToggled", true)
+		didTemporarilyOverrideYolo = true
 		telemetryService.captureHostEvent("yolo_flag", "true")
 	}
 
@@ -299,6 +315,10 @@ let activeContext: CliContext | null = null
 let isShuttingDown = false
 // Track if we're in plain text mode (no Ink UI) - set by runTask when piped stdin detected
 let isPlainTextMode = false
+// Track the original yoloModeToggled value from before this CLI session so we can restore it on exit.
+// The --yolo flag should only affect the current invocation, not persist across runs.
+let savedYoloModeToggled: boolean | null = null
+let didTemporarilyOverrideYolo = false
 
 /**
  * Wait for stdout to fully drain before exiting.
@@ -340,6 +360,10 @@ function setupSignalHandlers() {
 		printWarning(`${signal} received, shutting down...`)
 
 		try {
+			// Restore yolo state before any cleanup - this is idempotent and safe
+			// even if disposeCliContext also calls it (restoreYoloState checks savedYoloModeToggled !== null)
+			restoreYoloState()
+
 			if (activeContext) {
 				const task = activeContext.controller.task
 				if (task) {
@@ -347,6 +371,12 @@ function setupSignalHandlers() {
 				}
 				await disposeCliContext(activeContext)
 			} else {
+				// Best-effort flush of restored yolo state when no active context
+				try {
+					await StateManager.get().flushPendingState()
+				} catch {
+					// StateManager may not be initialized yet
+				}
 				await ErrorService.get().dispose()
 				await disposeTelemetryServices()
 			}
@@ -440,6 +470,11 @@ async function initializeCli(options: InitOptions): Promise<CliContext> {
 	)
 
 	await StateManager.initialize(extensionContext as any)
+
+	// Save the user's persisted yoloModeToggled value so we can restore it on exit.
+	// The --yolo flag temporarily overrides this for the current session only.
+	savedYoloModeToggled = StateManager.get().getGlobalSettingsKey("yoloModeToggled") ?? false
+
 	await ErrorService.initialize()
 
 	// Initialize OpenAI Codex OAuth manager with extension context for secrets storage
