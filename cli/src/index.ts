@@ -82,13 +82,14 @@ async function disposeTelemetryServices(): Promise<void> {
  * Must be called before flushPendingState so the restored value gets persisted.
  */
 function restoreYoloState(): void {
-	if (didTemporarilyOverrideYolo && savedYoloModeToggled !== null) {
+function restoreYoloState(): void {
+	if (savedYoloModeToggled !== null) {
 		try {
 			StateManager.get().setGlobalState("yoloModeToggled", savedYoloModeToggled)
+			savedYoloModeToggled = null
 		} catch {
 			// StateManager may not be initialized (e.g., early exit before init)
 		}
-		didTemporarilyOverrideYolo = false
 	}
 }
 
